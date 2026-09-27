@@ -154,8 +154,7 @@
     .upload-progress.active { display: flex; }
     .upload-progress .up-label { flex: 1; font-size: 13px; color: #1565c0; font-weight: 500; }
     .upload-progress .up-bar { width: 100px; height: 6px; background: #bbdefb; border-radius: 3px; overflow: hidden; }
-    .upload-progress .up-fill { height: 100%; background: #1976d2; width: 0%;
-      transition: width 0.2s; }
+    .upload-progress .up-fill { height: 100%; background: #1976d2; width: 0%; transition: width 0.2s; }
     .upload-progress .up-pct { font-size: 12px; color: #1565c0; font-weight: 600;
       font-family: monospace; min-width: 36px; text-align: right; }
 
@@ -363,3 +362,998 @@
   </div>
 
   <script>
+    const API_URL = 'https://script.google.com/macros/s/AKfycbwMM6HyTPQqmXZZ54aDLzPAI5jcU5T6lWF8mU4PXDPlFBZZrifBqmSFi3xmU7oVIRI/exec';
+
+    const CHUNK_SIZE = 5 * 1024 * 1024;
+    const MAX_VOICE_SECONDS = 600;
+    const MAX_IMAGE_DIMENSION = 1920;
+    const IMAGE_QUALITY = 0.82;
+
+    function api(action) {
+      const args = Array.prototype.slice.call(arguments, 1);
+      const payload = encodeURIComponent(JSON.stringify({ action: action, args: args }));
+      const url = API_URL + '?api=' + action + '&payload=' + payload;
+      return fetchWithRetry(url, 3);
+    }
+
+    function fetchWithRetry(url, retriesLeft) {
+      return fetch(url, { method: 'GET', redirect: 'follow' })
+        .then(function(r) {
+          return r.text().then(function(text) {
+            if (text.trim().charAt(0) === '<') {
+              console.error('HTML response:', text.slice(0, 300));
+              throw new Error('Server error — please try again.');
+            }
+            try { return JSON.parse(text); }
+            catch (e) {
+              console.error('Raw response:', text.slice(0, 500));
+              throw new Error('Bad response from backend.');
+            }
+          });
+        })
+        .catch(function(err) {
+          if (retriesLeft > 0 && !err.message.match(/Incorrect|Invalid|Unknown/)) {
+            return new Promise(function(resolve) { setTimeout(resolve, 800); })
+              .then(function() { return fetchWithRetry(url, retriesLeft - 1); });
+          }
+          throw err;
+        });
+    }
+
+    function fileToBase64(fileOrBlob) {
+      return new Promise(function(resolve, reject) {
+        const reader = new FileReader();
+        reader.onload = function() { resolve(reader.result.split(',')[1]); };
+        reader.onerror = reject;
+        reader.readAsDataURL(fileOrBlob);
+      });
+    }
+
+    function blobToBase64(blob) { return fileToBase64(blob); }
+
+    function formatBytes(bytes) {
+      if (bytes < 1024) return bytes + ' B';
+      if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+      if (bytes < 1024 * 1024 * 1024) return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+      return (bytes / (1024 * 1024 * 1024)).toFixed(2) + ' GB';
+    }
+
+    function compressImage(file) {
+      return new Promise(function(resolve, reject) {
+        if (!file.type.match(/^image\//)) return resolve(file);
+        if (file.size < 100 * 1024) return resolve(file);
+
+        const img = new Image();
+        const objectUrl = URL.createObjectURL(file);
+
+        img.onload = function() {
+          URL.revokeObjectURL(objectUrl);
+          let { width, height } = img;
+          const longest = Math.max(width, height);
+          if (longest > MAX_IMAGE_DIMENSION) {
+            const scale = MAX_IMAGE_DIMENSION / longest;
+            width = Math.round(width * scale);
+            height = Math.round(height * scale);
+          }
+          const canvas = document.createElement('canvas');
+          canvas.width = width;
+          canvas.height = height;
+          const ctx = canvas.getContext('2d');
+          ctx.drawImage(img, 0, 0, width, height);
+          canvas.toBlob(function(blob) {
+            if (!blob) return resolve(file);
+            if (blob.size >= file.size) return resolve(file);
+            const newName = file.name.replace(/\.[^.]+$/, '') + '.jpg';
+            const compressed = new File([blob], newName, { type: 'image/jpeg' });
+            console.log('Compressed: ' + formatBytes(file.size) + ' -> ' + formatBytes(compressed.size));
+            resolve(compressed);
+          }, 'image/jpeg', IMAGE_QUALITY);
+        };
+
+        img.onerror = function() {
+          URL.revokeObjectURL(objectUrl);
+          resolve(file);
+        };
+
+        img.src = objectUrl;
+      });
+    }
+
+    function showUploadProgress(label) {
+      document.getElementById('upLabel').textContent = label || 'Uploading...';
+      document.getElementById('upFill').style.width = '0%';
+      document.getElementById('upPct').textContent = '0%';
+      document.getElementById('uploadProgress').classList.add('active');
+    }
+    function updateUploadProgress(pct) {
+      document.getElementById('upFill').style.width = pct + '%';
+      document.getElementById('upPct').textContent = Math.round(pct) + '%';
+    }
+    function hideUploadProgress() {
+      document.getElementById('uploadProgress').classList.remove('active');
+    }
+
+    function uploadFileChunked(file, onProgress) {
+      const uploadId = 'u_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8);
+      const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
+
+      return (function uploadNext(index) {
+        if (index >= totalChunks) {
+          return api('finalizeUpload', uploadId, file.name, file.type || 'application/octet-stream', totalChunks)
+            .then(function(res) {
+              if (!res.success) throw new Error(res.error || 'Finalize failed');
+              return res;
+            });
+        }
+
+        const start = index * CHUNK_SIZE;
+        const end = Math.min(start + CHUNK_SIZE, file.size);
+        const chunk = file.slice(start, end);
+
+        return blobToBase64(chunk)
+          .then(function(base64) { return api('uploadChunk', uploadId, index, base64); })
+          .then(function(res) {
+            if (!res.success) throw new Error(res.error || 'Chunk failed');
+            const pct = Math.round(((index + 1) / totalChunks) * 100);
+            if (onProgress) onProgress(pct);
+            return uploadNext(index + 1);
+          });
+      })(0);
+    }
+
+    let currentUser = null;
+    let chatId = null;
+    let pollingInterval = null;
+    let renderedMessageIds = new Set();
+    let lastDateLabel = '';
+    let replyingTo = null;
+    let pendingWallpaper = null;
+    let mediaRecorder = null;
+    let audioChunks = [];
+    let recordingTimer = null;
+    let recordingStart = 0;
+    let currentStream = null;
+    let discardedRecording = false;
+    let userHasScrolledUp = false;
+
+    const SWIPE_THRESHOLD = 60;
+    const MAX_SWIPE = 80;
+
+    document.addEventListener('DOMContentLoaded', function() {
+      const saved = localStorage.getItem('chartUser');
+      if (saved) {
+        try {
+          const u = JSON.parse(saved);
+          if (u && u.userId) {
+            currentUser = u;
+            chatId = u.chatId;
+            showChatApp();
+            loadMessages(true);
+            loadWallpaper();
+            startPolling();
+          }
+        } catch(e) { localStorage.removeItem('chartUser'); }
+      }
+
+      const container = document.getElementById('messagesContainer');
+      container.addEventListener('scroll', function() {
+        const nearBottom = container.scrollHeight - container.scrollTop - container.clientHeight < 120;
+        userHasScrolledUp = !nearBottom;
+      });
+
+      document.body.addEventListener('touchmove', function(e) {
+        if (!e.target.closest('.messages-container') &&
+            !e.target.closest('.modal') &&
+            !e.target.closest('#loginScreen')) {
+          if (e.cancelable) e.preventDefault();
+        }
+      }, { passive: false });
+    });
+
+    function handleLogin() {
+      const username = document.getElementById('userSelect').value;
+      const password = document.getElementById('passwordInput').value;
+      const errEl = document.getElementById('errorMsg');
+      const btn = document.getElementById('loginBtn');
+
+      if (!username || !password) {
+        errEl.textContent = 'Please select a user and enter password';
+        errEl.style.display = 'block';
+        return;
+      }
+
+      errEl.style.display = 'none';
+      btn.disabled = true;
+      btn.textContent = 'Signing in...';
+
+      api('login', username, password)
+        .then(function(result) {
+          btn.disabled = false;
+          btn.textContent = 'Sign In';
+          if (result.success) {
+            currentUser = result;
+            chatId = result.chatId;
+            localStorage.setItem('chartUser', JSON.stringify(result));
+            showChatApp();
+            loadMessages(true);
+            loadWallpaper();
+            startPolling();
+          } else {
+            errEl.textContent = result.error;
+            errEl.style.display = 'block';
+          }
+        })
+        .catch(function(err) {
+          btn.disabled = false;
+          btn.textContent = 'Sign In';
+          errEl.textContent = 'Error: ' + err.message;
+          errEl.style.display = 'block';
+          console.error(err);
+        });
+    }
+
+    function handleLogout() {
+      if (currentUser) api('updateUserStatus', currentUser.userId, 'offline');
+      if (pollingInterval) { clearInterval(pollingInterval); pollingInterval = null; }
+      if (mediaRecorder && mediaRecorder.state === 'recording') {
+        discardedRecording = true;
+        try { mediaRecorder.stop(); } catch(e){}
+      }
+      if (currentStream) {
+        currentStream.getTracks().forEach(t => t.stop());
+        currentStream = null;
+      }
+      localStorage.removeItem('chartUser');
+      currentUser = null;
+      chatId = null;
+      replyingTo = null;
+      renderedMessageIds.clear();
+      lastDateLabel = '';
+      userHasScrolledUp = false;
+      document.getElementById('messagesContainer').innerHTML = '';
+      document.getElementById('replyPreview').classList.remove('active');
+      document.getElementById('recordingBar').classList.remove('active');
+      document.getElementById('uploadProgress').classList.remove('active');
+      document.getElementById('chatApp').classList.remove('active');
+      document.getElementById('loginScreen').style.display = 'flex';
+      document.getElementById('passwordInput').value = '';
+      document.getElementById('userSelect').value = '';
+    }
+
+    function showChatApp() {
+      document.getElementById('loginScreen').style.display = 'none';
+      document.getElementById('chatApp').classList.add('active');
+      const isBrian = currentUser.userId === 'brian_001';
+      const otherName = isBrian ? 'JANATE' : 'BRIAN';
+      document.getElementById('otherName').textContent = otherName;
+      document.getElementById('otherAvatar').textContent = otherName.charAt(0);
+      document.getElementById('wallpaperBtn').style.display = isBrian ? 'flex' : 'none';
+      updateStatus();
+    }
+
+    function updateStatus() {
+      if (!currentUser) return;
+      api('getOtherUserStatus', currentUser.userId)
+        .then(function(res) {
+          const dot = document.getElementById('statusDot');
+          const txt = document.getElementById('statusText');
+          if (res.status === 'online') {
+            dot.className = 'status-dot online';
+            txt.textContent = 'is online';
+          } else {
+            dot.className = 'status-dot offline';
+            txt.textContent = 'is offline';
+          }
+        })
+        .catch(function(e) { console.error(e); });
+    }
+
+    function loadMessages(isFullLoad) {
+      if (!chatId) return;
+      api('getMessages', chatId)
+        .then(function(messages) {
+          if (!Array.isArray(messages)) return;
+          if (isFullLoad) {
+            document.getElementById('messagesContainer').innerHTML = '';
+            renderedMessageIds.clear();
+            lastDateLabel = '';
+            userHasScrolledUp = false;
+            messages.forEach(renderMessage);
+            scrollToBottom(true);
+          } else {
+            let hasNew = false;
+            messages.forEach(function(msg) {
+              if (!renderedMessageIds.has(msg.messageId)) {
+                renderMessage(msg);
+                hasNew = true;
+              }
+            });
+            if (hasNew && !userHasScrolledUp) scrollToBottom();
+          }
+        })
+        .catch(function(err) { console.error('Load failed:', err); });
+    }
+
+    function renderMessage(msg) {
+      if (renderedMessageIds.has(msg.messageId)) return;
+      renderedMessageIds.add(msg.messageId);
+
+      const container = document.getElementById('messagesContainer');
+      const isSent = msg.senderId === currentUser.userId;
+      const date = new Date(msg.timestamp);
+
+      const dateLabel = date.toLocaleDateString([], { weekday: 'long', month: 'short', day: 'numeric' });
+      if (dateLabel !== lastDateLabel) {
+        const divider = document.createElement('div');
+        divider.className = 'date-divider';
+        divider.textContent = dateLabel;
+        container.appendChild(divider);
+        lastDateLabel = dateLabel;
+      }
+
+      const wrapper = document.createElement('div');
+      wrapper.className = 'message-wrapper ' + (isSent ? 'sent' : 'received');
+      wrapper.dataset.messageId = msg.messageId;
+
+      const indicator = document.createElement('div');
+      indicator.className = 'reply-indicator';
+      indicator.innerHTML = '<svg viewBox="0 0 24 24"><path d="M10 9V5l-7 7 7 7v-4.1c5 0 8.5 1.6 11 5.1-1-5-4-10-11-11z"/></svg>';
+      wrapper.appendChild(indicator);
+
+      const el = document.createElement('div');
+      el.className = 'message ' + (isSent ? 'sent' : 'received');
+      el.dataset.messageId = msg.messageId;
+
+      const timeStr = date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+
+      let quoteHtml = '';
+      if (msg.replyToMessageId && msg.replyToMessage) {
+        quoteHtml = '<div class="quoted-reply" data-quote-id="' + escapeAttr(msg.replyToMessageId) + '">' +
+            '<span class="quoted-name">' + escapeHtml(msg.replyToSenderName || '') + '</span>' +
+            '<span class="quoted-text">' + escapeHtml(msg.replyToMessage) + '</span></div>';
+      }
+
+      let bodyHtml = '';
+      const type = msg.type || 'text';
+
+      if (type === 'image' && msg.mediaURL) {
+        bodyHtml = '<img class="message-image" src="' + escapeAttr(msg.mediaURL) + '" alt="image" onclick="openImageViewer(\'' + escapeAttr(msg.mediaURL) + '\')">';
+        if (msg.message) bodyHtml += '<div class="message-text" style="margin-top:6px;">' + escapeHtml(msg.message) + '</div>';
+      } else if (type === 'voice' && msg.mediaURL) {
+        bodyHtml = '<div class="message-voice">' +
+            '<div class="voice-icon"><svg viewBox="0 0 24 24"><path d="M12 14c1.66 0 3-1.34 3-3V5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3z"/></svg></div>' +
+            '<audio controls preload="metadata" src="' + escapeAttr(msg.mediaURL) + '"></audio></div>';
+        if (msg.message) bodyHtml += '<div class="message-text" style="margin-top:6px;">' + escapeHtml(msg.message) + '</div>';
+      } else if (type === 'file' && msg.mediaURL) {
+        bodyHtml = '<a class="message-file" href="' + escapeAttr(msg.mediaURL) + '" target="_blank" rel="noopener">' +
+            '<svg viewBox="0 0 24 24"><path d="M14 2H6c-1.1 0-1.99.9-1.99 2L4 20c0 1.1.89 2 1.99 2H18c1.1 0 2-.9 2-2V8l-6-6zm2 16H8v-2h8v2zm0-4H8v-2h8v2zm-3-5V3.5L18.5 9H13z"/></svg>' +
+            '<span class="file-name">' + escapeHtml(msg.mediaName || 'file') + '</span></a>';
+        if (msg.message) bodyHtml += '<div class="message-text" style="margin-top:6px;">' + escapeHtml(msg.message) + '</div>';
+      } else {
+        bodyHtml = '<div class="message-text">' + escapeHtml(msg.message) + '</div>';
+      }
+
+      el.innerHTML = (!isSent ? '<div class="sender-name">' + escapeHtml(msg.senderName || '') + '</div>' : '') +
+        quoteHtml + bodyHtml + '<div class="time">' + timeStr +
+        (isSent ? '<span class="checkmark">✓✓</span>' : '') + '</div>';
+
+      const quoteEl = el.querySelector('.quoted-reply');
+      if (quoteEl) {
+        quoteEl.addEventListener('click', function(e) {
+          e.stopPropagation();
+          jumpToMessage(msg.replyToMessageId);
+        });
+      }
+
+      wrapper.appendChild(el);
+      container.appendChild(wrapper);
+      attachSwipeHandlers(wrapper, el, msg);
+    }
+
+    function attachSwipeHandlers(wrapper, el, msg) {
+      let startX = 0, startY = 0, currentX = 0;
+      let isSwiping = false, isHorizontal = null;
+
+      function onDown(e) {
+        if (e.target.closest('.quoted-reply') || e.target.closest('audio') ||
+            e.target.closest('img') || e.target.closest('a')) return;
+        const point = e.touches ? e.touches[0] : e;
+        startX = point.clientX; startY = point.clientY;
+        currentX = 0; isSwiping = false; isHorizontal = null;
+        el.style.transition = 'none';
+      }
+
+      function onMove(e) {
+        if (startX === 0 && startY === 0) return;
+        const point = e.touches ? e.touches[0] : e;
+        const dx = point.clientX - startX;
+        const dy = point.clientY - startY;
+        if (dx < 0) return;
+        if (isHorizontal === null) {
+          if (Math.abs(dx) > 8 || Math.abs(dy) > 8) {
+            isHorizontal = Math.abs(dx) > Math.abs(dy);
+          }
+        }
+        if (isHorizontal === false) return;
+        if (isHorizontal === true && e.cancelable) e.preventDefault();
+        isSwiping = true;
+        currentX = Math.min(dx, MAX_SWIPE);
+        el.style.transform = 'translateX(' + currentX + 'px)';
+        if (currentX > 10) wrapper.classList.add('swiping');
+        else wrapper.classList.remove('swiping');
+      }
+
+      function onUp() {
+        if (!isSwiping) {
+          el.style.transition = '';
+          wrapper.classList.remove('swiping');
+          startX = 0; startY = 0;
+          return;
+        }
+        el.style.transition = 'transform 0.2s ease';
+        if (currentX >= SWIPE_THRESHOLD) {
+          startReply(msg);
+          el.style.transform = 'translateX(20px)';
+          setTimeout(function() {
+            el.style.transform = 'translateX(0)';
+            wrapper.classList.remove('swiping');
+          }, 200);
+        } else {
+          el.style.transform = 'translateX(0)';
+          wrapper.classList.remove('swiping');
+        }
+        startX = 0; startY = 0; isSwiping = false; isHorizontal = null;
+      }
+
+      el.addEventListener('touchstart', onDown, { passive: true });
+      el.addEventListener('touchmove', onMove, { passive: false });
+      el.addEventListener('touchend', onUp);
+      el.addEventListener('touchcancel', onUp);
+
+      el.addEventListener('mousedown', function(e) {
+        if (e.target.closest('.quoted-reply') || e.target.closest('audio') ||
+            e.target.closest('img') || e.target.closest('a')) return;
+        e.preventDefault();
+        onDown(e);
+        const moveHandler = function(ev) { onMove(ev); };
+        const upHandler = function() {
+          onUp();
+          document.removeEventListener('mousemove', moveHandler);
+          document.removeEventListener('mouseup', upHandler);
+        };
+        document.addEventListener('mousemove', moveHandler);
+        document.addEventListener('mouseup', upHandler);
+      });
+    }
+
+    function startReply(msg) {
+      const previewText = msg.type === 'image' ? '📷 Photo' :
+                          msg.type === 'voice' ? '🎤 Voice note' :
+                          msg.type === 'file' ? '📎 File' : msg.message;
+      replyingTo = {
+        messageId: msg.messageId,
+        senderName: msg.senderId === currentUser.userId ? 'You' : (msg.senderName || ''),
+        message: previewText
+      };
+      document.getElementById('replyToName').textContent = replyingTo.senderName;
+      document.getElementById('replyToText').textContent = replyingTo.message;
+      document.getElementById('replyPreview').classList.add('active');
+      setTimeout(function() { document.getElementById('messageInput').focus(); }, 100);
+    }
+
+    function cancelReply() {
+      replyingTo = null;
+      document.getElementById('replyPreview').classList.remove('active');
+    }
+
+    function jumpToMessage(messageId) {
+      const wrapper = document.querySelector('.message-wrapper[data-message-id="' + messageId + '"]');
+      if (!wrapper) return;
+      wrapper.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      const bubble = wrapper.querySelector('.message');
+      if (bubble) {
+        bubble.classList.remove('flash-highlight');
+        void bubble.offsetWidth;
+        bubble.classList.add('flash-highlight');
+        setTimeout(function() { bubble.classList.remove('flash-highlight'); }, 1300);
+      }
+    }
+
+    function sendMessage() {
+      const input = document.getElementById('messageInput');
+      const text = input.value.trim();
+      if (!text) return;
+      input.value = '';
+      const reply = replyingTo;
+      cancelReply();
+      sendToServer('text', text, null, reply);
+    }
+
+    function handleKeyPress(e) { if (e.key === 'Enter') sendMessage(); }
+
+    function sendToServer(type, text, media, reply) {
+      if (!chatId || !currentUser) return;
+      const tempId = 'temp_' + Date.now();
+
+      const fakeMsg = {
+        messageId: tempId,
+        senderId: currentUser.userId,
+        senderName: currentUser.displayName,
+        message: text || '',
+        timestamp: new Date().toISOString(),
+        replyToMessageId: reply ? reply.messageId : '',
+        replyToSenderName: reply ? reply.senderName : '',
+        replyToMessage: reply ? reply.message : '',
+        type: type,
+        mediaURL: media && media.previewURL ? media.previewURL : '',
+        mediaName: media ? media.fileName : '',
+        mediaType: media ? media.mimeType : ''
+      };
+
+      renderMessage(fakeMsg);
+      scrollToBottom();
+
+      const payload = media ? {
+        base64: media.base64 || null,
+        fileName: media.fileName,
+        mimeType: media.mimeType,
+        url: media.url || null
+      } : null;
+
+      api('sendMessage', chatId, currentUser.userId, currentUser.displayName,
+          text || '',
+          reply ? reply.messageId : '',
+          reply ? reply.senderName : '',
+          reply ? reply.message : '',
+          type, payload)
+        .then(function(result) {
+          renderedMessageIds.delete(tempId);
+          if (result && result.messageId) renderedMessageIds.add(result.messageId);
+        })
+        .catch(function(err) {
+          console.error('Send failed:', err);
+          alert('Failed to send: ' + err.message);
+        });
+    }
+
+    function handleImageSelect(e) {
+      const file = e.target.files[0];
+      if (!file) return;
+      const reply = replyingTo; cancelReply();
+
+      showUploadProgress('Compressing image...');
+      compressImage(file)
+        .then(function(compressed) {
+          showUploadProgress('Uploading ' + formatBytes(compressed.size) + '...');
+          if (compressed.size <= CHUNK_SIZE * 0.8) {
+            return fileToBase64(compressed).then(function(base64) {
+              updateUploadProgress(100);
+              sendToServer('image', '', {
+                base64: base64,
+                fileName: compressed.name,
+                mimeType: compressed.type || 'image/jpeg',
+                previewURL: null
+              }, reply);
+              hideUploadProgress();
+            });
+          }
+          return uploadFileChunked(compressed, function(pct) { updateUploadProgress(pct); })
+            .then(function(res) {
+              sendToServer('image', '', {
+                url: res.url,
+                fileName: compressed.name,
+                mimeType: compressed.type || 'image/jpeg',
+                previewURL: res.url
+              }, reply);
+              hideUploadProgress();
+            });
+        })
+        .catch(function(err) {
+          hideUploadProgress();
+          alert('Image upload failed: ' + err.message);
+          console.error(err);
+        })
+        .finally(function() { e.target.value = ''; });
+    }
+
+    function handleFileSelect(e) {
+      const file = e.target.files[0];
+      if (!file) return;
+      const reply = replyingTo; cancelReply();
+
+      showUploadProgress('Uploading ' + formatBytes(file.size) + '...');
+
+      if (file.size <= CHUNK_SIZE * 0.8) {
+        fileToBase64(file)
+          .then(function(base64) {
+            updateUploadProgress(100);
+            sendToServer('file', '', {
+              base64: base64,
+              fileName: file.name,
+              mimeType: file.type || 'application/octet-stream',
+              previewURL: null
+            }, reply);
+            hideUploadProgress();
+          })
+          .catch(function(err) {
+            hideUploadProgress();
+            alert('File upload failed: ' + err.message);
+            console.error(err);
+          })
+          .finally(function() { e.target.value = ''; });
+        return;
+      }
+
+      uploadFileChunked(file, function(pct) { updateUploadProgress(pct); })
+        .then(function(res) {
+          sendToServer('file', '', {
+            url: res.url,
+            fileName: file.name,
+            mimeType: file.type || 'application/octet-stream',
+            previewURL: null
+          }, reply);
+          hideUploadProgress();
+        })
+        .catch(function(err) {
+          hideUploadProgress();
+          alert('File upload failed: ' + err.message);
+          console.error(err);
+        })
+        .finally(function() { e.target.value = ''; });
+    }
+
+    function toggleRecording() {
+      if (mediaRecorder && mediaRecorder.state === 'recording') stopAndSendRecording();
+      else startRecording();
+    }
+
+    function startRecording() {
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        alert('Voice recording is not supported here.');
+        return;
+      }
+      if (typeof MediaRecorder === 'undefined') {
+        alert('MediaRecorder API is not available.');
+        return;
+      }
+
+      navigator.mediaDevices.getUserMedia({
+        audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true }
+      })
+        .then(function(stream) {
+          currentStream = stream;
+          audioChunks = [];
+          discardedRecording = false;
+
+          const candidates = [
+            { mime: 'audio/webm;codecs=opus', opts: { mimeType: 'audio/webm;codecs=opus', audioBitsPerSecond: 16000 } },
+            { mime: 'audio/webm',             opts: { mimeType: 'audio/webm',             audioBitsPerSecond: 16000 } },
+            { mime: 'audio/ogg;codecs=opus',  opts: { mimeType: 'audio/ogg;codecs=opus',  audioBitsPerSecond: 16000 } },
+            { mime: 'audio/mp4',              opts: { mimeType: 'audio/mp4',              audioBitsPerSecond: 24000 } }
+          ];
+
+          let chosenOpts = null;
+          for (let i = 0; i < candidates.length; i++) {
+            if (MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported(candidates[i].mime)) {
+              chosenOpts = candidates[i].opts;
+              break;
+            }
+          }
+
+          try {
+            mediaRecorder = chosenOpts ? new MediaRecorder(stream, chosenOpts) : new MediaRecorder(stream);
+          } catch (err) { mediaRecorder = new MediaRecorder(stream); }
+
+          mediaRecorder.ondataavailable = function(e) {
+            if (e.data && e.data.size > 0) audioChunks.push(e.data);
+          };
+          mediaRecorder.onerror = function(e) { console.error('MediaRecorder error:', e); };
+
+          mediaRecorder.start(1000);
+          showRecordingUI();
+        })
+        .catch(function(err) {
+          const name = err && err.name ? err.name : 'UnknownError';
+          let friendly = '';
+          if (name === 'NotAllowedError' || name === 'PermissionDeniedError') {
+            friendly = 'Microphone access was blocked. Allow it in your browser settings and try again.';
+          } else if (name === 'NotFoundError') { friendly = 'No microphone found.'; }
+          else if (name === 'NotReadableError') { friendly = 'Microphone is in use by another app.'; }
+          else { friendly = err.message || ''; }
+          alert('❌ ' + name + '\n\n' + friendly);
+          console.error(err);
+        });
+    }
+
+    function showRecordingUI() {
+      document.getElementById('recordingBar').classList.add('active');
+      document.getElementById('recBtn').classList.add('recording');
+      recordingStart = Date.now();
+      updateRecordingTime();
+      recordingTimer = setInterval(updateRecordingTime, 500);
+    }
+
+    function updateRecordingTime() {
+      const secs = Math.floor((Date.now() - recordingStart) / 1000);
+      const m = Math.floor(secs / 60);
+      const s = secs % 60;
+      document.getElementById('recTime').textContent = m + ':' + (s < 10 ? '0' : '') + s;
+      if (secs >= MAX_VOICE_SECONDS) stopAndSendRecording();
+    }
+
+    function stopAndSendRecording() {
+      if (!mediaRecorder || mediaRecorder.state !== 'recording') return;
+      clearInterval(recordingTimer);
+
+      const elapsed = Date.now() - recordingStart;
+      if (elapsed < 500) discardedRecording = true;
+
+      mediaRecorder.onstop = function() {
+        if (currentStream) {
+          currentStream.getTracks().forEach(function(t) { t.stop(); });
+          currentStream = null;
+        }
+        document.getElementById('recordingBar').classList.remove('active');
+        document.getElementById('recBtn').classList.remove('recording');
+
+        if (discardedRecording) {
+          discardedRecording = false;
+          audioChunks = [];
+          return;
+        }
+
+        const blob = new Blob(audioChunks, { type: audioChunks[0] ? audioChunks[0].type : 'audio/webm' });
+        audioChunks = [];
+        if (blob.size < 500) return;
+
+        const reply = replyingTo;
+        cancelReply();
+        showUploadProgress('Uploading voice note (' + formatBytes(blob.size) + ')...');
+
+        const ext = blob.type.indexOf('mp4') !== -1 ? 'm4a' :
+                    blob.type.indexOf('ogg') !== -1 ? 'ogg' : 'webm';
+
+        if (blob.size <= CHUNK_SIZE * 0.8) {
+          blobToBase64(blob)
+            .then(function(base64) {
+              updateUploadProgress(100);
+              sendToServer('voice', '', {
+                base64: base64,
+                fileName: 'voice_' + Date.now() + '.' + ext,
+                mimeType: blob.type || 'audio/webm',
+                previewURL: null
+              }, reply);
+              hideUploadProgress();
+            })
+            .catch(function(err) {
+              hideUploadProgress();
+              alert('Voice upload failed: ' + err.message);
+              console.error(err);
+            });
+        } else {
+          uploadFileChunked(new File([blob], 'voice_' + Date.now() + '.' + ext, { type: blob.type }), function(pct) {
+            updateUploadProgress(pct);
+          })
+            .then(function(res) {
+              sendToServer('voice', '', {
+                url: res.url,
+                fileName: res.name || 'voice.' + ext,
+                mimeType: blob.type || 'audio/webm',
+                previewURL: res.url
+              }, reply);
+              hideUploadProgress();
+            })
+            .catch(function(err) {
+              hideUploadProgress();
+              alert('Voice upload failed: ' + err.message);
+              console.error(err);
+            });
+        }
+      };
+
+      mediaRecorder.stop();
+    }
+
+    function cancelRecording() {
+      if (!mediaRecorder) return;
+      clearInterval(recordingTimer);
+      discardedRecording = true;
+      if (mediaRecorder.state === 'recording') {
+        mediaRecorder.onstop = function() {
+          if (currentStream) {
+            currentStream.getTracks().forEach(function(t) { t.stop(); });
+            currentStream = null;
+          }
+        };
+        mediaRecorder.stop();
+      }
+      audioChunks = [];
+      document.getElementById('recordingBar').classList.remove('active');
+      document.getElementById('recBtn').classList.remove('recording');
+    }
+
+    function openPasswordModal() {
+      document.getElementById('currentPwd').value = '';
+      document.getElementById('newPwd').value = '';
+      document.getElementById('confirmPwd').value = '';
+      document.getElementById('pwdMsg').style.display = 'none';
+      document.getElementById('passwordModal').classList.add('active');
+    }
+    function closePasswordModal() { document.getElementById('passwordModal').classList.remove('active'); }
+
+    function submitPasswordChange() {
+      const cur = document.getElementById('currentPwd').value;
+      const nw = document.getElementById('newPwd').value;
+      const cf = document.getElementById('confirmPwd').value;
+      const m = document.getElementById('pwdMsg');
+
+      function showMsg(text, cls) {
+        m.textContent = text;
+        m.className = 'modal-msg ' + cls;
+        m.style.display = 'block';
+      }
+
+      if (!cur || !nw || !cf) return showMsg('Please fill all fields', 'error');
+      if (nw !== cf) return showMsg('New passwords do not match', 'error');
+      if (nw.length < 4) return showMsg('Password too short (min 4)', 'error');
+
+      api('changePassword', currentUser.userId, cur, nw)
+        .then(function(res) {
+          if (res.success) {
+            showMsg('Password updated!', 'success');
+            setTimeout(closePasswordModal, 1200);
+          } else { showMsg(res.error || 'Failed', 'error'); }
+        })
+        .catch(function(err) { showMsg('Error: ' + err.message, 'error'); });
+    }
+
+    function openWallpaperModal() {
+      if (currentUser.userId !== 'brian_001') return;
+      document.getElementById('wallpaperMsg').style.display = 'none';
+      pendingWallpaper = null;
+      refreshWallpaperPreview();
+      document.getElementById('wallpaperModal').classList.add('active');
+    }
+    function closeWallpaperModal() { document.getElementById('wallpaperModal').classList.remove('active'); }
+
+    function refreshWallpaperPreview() {
+      const preview = document.getElementById('wallpaperPreview');
+      if (pendingWallpaper) {
+        preview.style.backgroundImage = 'url(' + pendingWallpaper.dataURL + ')';
+        preview.textContent = '';
+      } else {
+        const c = document.getElementById('messagesContainer');
+        const bg = c.style.backgroundImage;
+        if (bg && bg !== 'none') {
+          preview.style.backgroundImage = bg;
+          preview.textContent = '';
+        } else {
+          preview.style.backgroundImage = '';
+          preview.textContent = 'No custom wallpaper';
+        }
+      }
+    }
+
+    function handleWallpaperSelect(e) {
+      const file = e.target.files[0];
+      if (!file) return;
+
+      const msg = document.getElementById('wallpaperMsg');
+      msg.textContent = 'Compressing...';
+      msg.className = 'modal-msg';
+      msg.style.display = 'block';
+
+      compressImage(file)
+        .then(function(compressed) {
+          return fileToBase64(compressed).then(function(base64) {
+            pendingWallpaper = {
+              base64: base64,
+              mimeType: compressed.type || 'image/jpeg',
+              fileName: compressed.name,
+              dataURL: 'data:' + (compressed.type || 'image/jpeg') + ';base64,' + base64
+            };
+            refreshWallpaperPreview();
+            msg.style.display = 'none';
+          });
+        })
+        .catch(function(err) {
+          msg.textContent = 'Failed to load image: ' + err.message;
+          msg.className = 'modal-msg error';
+        })
+        .finally(function() { e.target.value = ''; });
+    }
+
+    function uploadWallpaper() {
+      const m = document.getElementById('wallpaperMsg');
+      if (!pendingWallpaper) {
+        m.textContent = 'Please choose an image first';
+        m.className = 'modal-msg error';
+        m.style.display = 'block';
+        return;
+      }
+      m.textContent = 'Uploading...';
+      m.className = 'modal-msg';
+      m.style.display = 'block';
+
+      api('setWallpaper', currentUser.userId, pendingWallpaper.base64, pendingWallpaper.mimeType, pendingWallpaper.fileName)
+        .then(function(res) {
+          if (res.success) {
+            applyWallpaper(res.url);
+            m.textContent = 'Wallpaper updated!';
+            m.className = 'modal-msg success';
+            pendingWallpaper = null;
+            setTimeout(closeWallpaperModal, 1200);
+          } else {
+            m.textContent = res.error || 'Failed';
+            m.className = 'modal-msg error';
+          }
+        })
+        .catch(function(err) {
+          m.textContent = 'Error: ' + err.message;
+          m.className = 'modal-msg error';
+        });
+    }
+
+    function removeWallpaper() {
+      api('clearWallpaper', currentUser.userId)
+        .then(function(res) {
+          if (res.success) {
+            const c = document.getElementById('messagesContainer');
+            c.style.backgroundImage = "url('data:image/svg+xml;utf8,<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"60\" height=\"60\" viewBox=\"0 0 60 60\"><g fill=\"%23d9d0c7\" fill-opacity=\"0.4\"><circle cx=\"10\" cy=\"10\" r=\"1.5\"/><circle cx=\"40\" cy=\"25\" r=\"1.5\"/><circle cx=\"20\" cy=\"45\" r=\"1.5\"/><circle cx=\"50\" cy=\"50\" r=\"1.5\"/></g></svg>')";
+            const m = document.getElementById('wallpaperMsg');
+            m.textContent = 'Wallpaper removed';
+            m.className = 'modal-msg success';
+            m.style.display = 'block';
+            setTimeout(closeWallpaperModal, 1000);
+          }
+        });
+    }
+
+    function applyWallpaper(url) {
+      const c = document.getElementById('messagesContainer');
+      c.style.backgroundImage = 'url(' + url + ')';
+    }
+
+    function loadWallpaper() {
+      api('getWallpaper')
+        .then(function(url) { if (url) applyWallpaper(url); })
+        .catch(function(e) { console.error(e); });
+    }
+
+    function openImageViewer(url) {
+      document.getElementById('viewerImg').src = url;
+      document.getElementById('imageViewer').classList.add('active');
+    }
+    function closeImageViewer() {
+      document.getElementById('imageViewer').classList.remove('active');
+      document.getElementById('viewerImg').src = '';
+    }
+
+    function startPolling() {
+      if (pollingInterval) clearInterval(pollingInterval);
+      pollingInterval = setInterval(function() {
+        loadMessages(false);
+        updateStatus();
+      }, 2000);
+    }
+
+    function scrollToBottom(force) {
+      const c = document.getElementById('messagesContainer');
+      if (!force && userHasScrolledUp) return;
+      requestAnimationFrame(function() { c.scrollTop = c.scrollHeight; });
+    }
+
+    function escapeHtml(text) {
+      const div = document.createElement('div');
+      div.textContent = text == null ? '' : text;
+      return div.innerHTML;
+    }
+
+    function escapeAttr(text) {
+      return String(text == null ? '' : text)
+        .replace(/&/g, '&amp;').replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    }
+  </script>
+</body>
+</html>
