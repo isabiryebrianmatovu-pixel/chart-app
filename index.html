@@ -365,10 +365,12 @@
     const API_URL = 'https://script.google.com/macros/s/AKfycbwMM6HyTPQqmXZZ54aDLzPAI5jcU5T6lWF8mU4PXDPlFBZZrifBqmSFi3xmU7oVIRI/exec';
 
     const CHUNK_SIZE = 5 * 1024 * 1024;
+    const INLINE_MAX = 200 * 1024;   // anything bigger goes chunked
     const MAX_VOICE_SECONDS = 600;
     const MAX_IMAGE_DIMENSION = 1920;
     const IMAGE_QUALITY = 0.82;
 
+    // ============ GET-based API (small actions) ============
     function api(action) {
       const args = Array.prototype.slice.call(arguments, 1);
       const payload = encodeURIComponent(JSON.stringify({ action: action, args: args }));
@@ -398,6 +400,42 @@
           }
           throw err;
         });
+    }
+
+    // ============ POST-based API (media / wallpaper) ============
+    function apiPost(action) {
+      const args = Array.prototype.slice.call(arguments, 1);
+      const body = JSON.stringify({ action: action, args: args });
+      return fetchPostWithRetry(API_URL, body, 3);
+    }
+
+    function fetchPostWithRetry(url, body, retriesLeft) {
+      return fetch(url, {
+        method: 'POST',
+        redirect: 'follow',
+        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+        body: body
+      })
+      .then(function(r) {
+        return r.text().then(function(text) {
+          if (text.trim().charAt(0) === '<') {
+            console.error('HTML response:', text.slice(0, 300));
+            throw new Error('Server returned HTML — check Apps Script deployment is "Anyone".');
+          }
+          try { return JSON.parse(text); }
+          catch (e) {
+            console.error('Raw response:', text.slice(0, 500));
+            throw new Error('Bad response from backend.');
+          }
+        });
+      })
+      .catch(function(err) {
+        if (retriesLeft > 0 && !err.message.match(/Incorrect|Invalid|Unknown/)) {
+          return new Promise(function(resolve) { setTimeout(resolve, 800); })
+            .then(function() { return fetchPostWithRetry(url, body, retriesLeft - 1); });
+        }
+        throw err;
+      });
     }
 
     function fileToBase64(fileOrBlob) {
@@ -479,7 +517,7 @@
 
       return (function uploadNext(index) {
         if (index >= totalChunks) {
-          return api('finalizeUpload', uploadId, file.name, file.type || 'application/octet-stream', totalChunks)
+          return apiPost('finalizeUpload', uploadId, file.name, file.type || 'application/octet-stream', totalChunks)
             .then(function(res) {
               if (!res.success) throw new Error(res.error || 'Finalize failed');
               return res;
@@ -491,7 +529,7 @@
         const chunk = file.slice(start, end);
 
         return blobToBase64(chunk)
-          .then(function(base64) { return api('uploadChunk', uploadId, index, base64); })
+          .then(function(base64) { return apiPost('uploadChunk', uploadId, index, base64); })
           .then(function(res) {
             if (!res.success) throw new Error(res.error || 'Chunk failed');
             const pct = Math.round(((index + 1) / totalChunks) * 100);
@@ -900,7 +938,7 @@
         url: media.url || null
       } : null;
 
-      api('sendMessage', chatId, currentUser.userId, currentUser.displayName,
+      apiPost('sendMessage', chatId, currentUser.userId, currentUser.displayName,
           text || '',
           reply ? reply.messageId : '',
           reply ? reply.senderName : '',
@@ -925,7 +963,7 @@
       compressImage(file)
         .then(function(compressed) {
           showUploadProgress('Uploading ' + formatBytes(compressed.size) + '...');
-          if (compressed.size <= CHUNK_SIZE * 0.8) {
+          if (compressed.size <= INLINE_MAX) {
             return fileToBase64(compressed).then(function(base64) {
               updateUploadProgress(100);
               sendToServer('image', '', {
@@ -963,7 +1001,7 @@
 
       showUploadProgress('Uploading ' + formatBytes(file.size) + '...');
 
-      if (file.size <= CHUNK_SIZE * 0.8) {
+      if (file.size <= INLINE_MAX) {
         fileToBase64(file)
           .then(function(base64) {
             updateUploadProgress(100);
@@ -1113,7 +1151,7 @@
         const ext = blob.type.indexOf('mp4') !== -1 ? 'm4a' :
                     blob.type.indexOf('ogg') !== -1 ? 'ogg' : 'webm';
 
-        if (blob.size <= CHUNK_SIZE * 0.8) {
+        if (blob.size <= INLINE_MAX) {
           blobToBase64(blob)
             .then(function(base64) {
               updateUploadProgress(100);
@@ -1275,7 +1313,7 @@
       m.className = 'modal-msg';
       m.style.display = 'block';
 
-      api('setWallpaper', currentUser.userId, pendingWallpaper.base64, pendingWallpaper.mimeType, pendingWallpaper.fileName)
+      apiPost('setWallpaper', currentUser.userId, pendingWallpaper.base64, pendingWallpaper.mimeType, pendingWallpaper.fileName)
         .then(function(res) {
           if (res.success) {
             applyWallpaper(res.url);
