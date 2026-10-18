@@ -135,17 +135,6 @@
     .rec-btn.recording { background: #c0392b; animation: recPulse 1.2s infinite; }
     @keyframes recPulse { 0%,100% { box-shadow: 0 0 0 0 rgba(231,76,60,0.6); } 50% { box-shadow: 0 0 0 10px rgba(231,76,60,0); } }
 
-    /* NEW: Attachment Preview Bar */
-    .attachment-preview { display: none; padding: 8px 12px; background: #e8f5e9;
-      border-top: 1px solid #c8e6c9; align-items: center; gap: 10px; flex-shrink: 0; }
-    .attachment-preview.active { display: flex; }
-    .attachment-preview img { width: 40px; height: 40px; object-fit: cover; border-radius: 4px; }
-    .attachment-preview .file-icon { width: 40px; height: 40px; background: #ccc; border-radius: 4px; display: flex; align-items: center; justify-content: center; font-weight: bold; color: #555; }
-    .attachment-preview .info { flex: 1; overflow: hidden; }
-    .attachment-preview .info .name { font-size: 13px; font-weight: 500; color: #333; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .attachment-preview .info .size { font-size: 11px; color: #777; }
-    .attachment-preview .close-btn { background: #c8e6c9; border: none; width: 24px; height: 24px; border-radius: 50%; cursor: pointer; color: #2e7d32; font-weight: bold; display: flex; align-items: center; justify-content: center; }
-
     .reply-preview { display: none; padding: 8px 12px; background: #f0f0f0;
       border-top: 1px solid #ddd; border-left: 4px solid var(--accent);
       align-items: center; gap: 10px; animation: slideUp 0.2s ease; flex-shrink: 0; }
@@ -226,6 +215,30 @@
       background: rgba(255,255,255,0.2); border: none; color: white;
       font-size: 22px; cursor: pointer; }
 
+    /* NEW: WhatsApp-Style Caption Overlay */
+    .caption-overlay { position: fixed; inset: 0; background: #000;
+      display: none; flex-direction: column; z-index: 300;
+      height: 100vh; height: 100dvh; }
+    .caption-overlay.active { display: flex; }
+    .caption-header { padding: 15px; display: flex; align-items: center;
+      background: rgba(0,0,0,0.5); position: absolute; top: 0; left: 0; right: 0; z-index: 10; }
+    .caption-header button { background: transparent; border: none; color: white;
+      font-size: 28px; cursor: pointer; padding: 0 10px; }
+    .caption-preview { flex: 1; display: flex; align-items: center;
+      justify-content: center; overflow: hidden; padding: 60px 10px 10px 10px; }
+    .caption-preview img { max-width: 100%; max-height: 100%; object-fit: contain; }
+    .caption-preview .file-preview { display: flex; flex-direction: column;
+      align-items: center; color: white; gap: 15px; }
+    .caption-preview .file-preview svg { width: 80px; height: 80px; fill: #aaa; }
+    .caption-footer { padding: 10px 15px 20px 15px; display: flex;
+      align-items: center; gap: 10px; background: rgba(0,0,0,0.5); }
+    .caption-footer input { flex: 1; padding: 12px 18px; border-radius: 24px;
+      border: none; font-size: 15px; background: rgba(255,255,255,0.9); outline: none; }
+    .caption-footer .send-btn { background: var(--accent); }
+    
+    /* Hide main chat UI when overlay is active */
+    body.caption-mode #chatApp { display: none; }
+
     .messages-container::-webkit-scrollbar { width: 6px; }
     .messages-container::-webkit-scrollbar-track { background: transparent; }
     .messages-container::-webkit-scrollbar-thumb { background: rgba(0,0,0,0.25); border-radius: 3px; }
@@ -296,16 +309,6 @@
       <button class="header-btn" onclick="stopAndSendRecording()" style="background:#27ae60;color:white;">✓ Send</button>
     </div>
 
-    <!-- NEW: Staged Attachment Preview -->
-    <div class="attachment-preview" id="attachmentPreview">
-      <div id="attachmentContent"></div>
-      <div class="info">
-        <div class="name" id="attachmentName"></div>
-        <div class="size" id="attachmentSize"></div>
-      </div>
-      <button class="close-btn" onclick="clearPendingAttachment()">✕</button>
-    </div>
-
     <div class="reply-preview" id="replyPreview">
       <div class="reply-preview-content">
         <div class="reply-to-name" id="replyToName"></div>
@@ -328,6 +331,22 @@
         <svg viewBox="0 0 24 24"><path d="M12 14c1.66 0 3-1.34 3-3V5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3zm5.3-3c0 3-2.54 5.1-5.3 5.1S6.7 14 6.7 11H5c0 3.41 2.72 6.23 6 6.72V21h2v-3.28c3.28-.48 6-3.3 6-6.72h-1.7z"/></svg>
       </button>
       <button class="send-btn" onclick="sendMessage()">
+        <svg viewBox="0 0 24 24"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg>
+      </button>
+    </div>
+  </div>
+
+  <!-- NEW: Full-Screen Caption Overlay -->
+  <div class="caption-overlay" id="captionOverlay">
+    <div class="caption-header">
+      <button onclick="cancelAttachment()">✕</button>
+    </div>
+    <div class="caption-preview" id="captionPreview">
+      <!-- Preview content injected via JS -->
+    </div>
+    <div class="caption-footer">
+      <input type="text" id="captionInput" placeholder="Add a caption..." autocomplete="off">
+      <button class="send-btn" onclick="sendAttachmentWithCaption()">
         <svg viewBox="0 0 24 24"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg>
       </button>
     </div>
@@ -504,7 +523,6 @@
             if (blob.size >= file.size) return resolve(file);
             const newName = file.name.replace(/\.[^.]+$/, '') + '.jpg';
             const compressed = new File([blob], newName, { type: 'image/jpeg' });
-            console.log('Compressed: ' + formatBytes(file.size) + ' -> ' + formatBytes(compressed.size));
             resolve(compressed);
           }, 'image/jpeg', IMAGE_QUALITY);
         };
@@ -566,7 +584,7 @@
     let renderedMessageIds = new Set();
     let lastDateLabel = '';
     let replyingTo = null;
-    let pendingAttachment = null; // NEW: Holds the file/image waiting for a caption
+    let pendingAttachment = null; 
     let pendingWallpaper = null;
     let mediaRecorder = null;
     let audioChunks = [];
@@ -604,7 +622,8 @@
       document.body.addEventListener('touchmove', function(e) {
         if (!e.target.closest('.messages-container') &&
             !e.target.closest('.modal') &&
-            !e.target.closest('#loginScreen')) {
+            !e.target.closest('#loginScreen') &&
+            !e.target.closest('.caption-overlay')) {
           if (e.cancelable) e.preventDefault();
         }
       }, { passive: false });
@@ -675,7 +694,8 @@
       document.getElementById('replyPreview').classList.remove('active');
       document.getElementById('recordingBar').classList.remove('active');
       document.getElementById('uploadProgress').classList.remove('active');
-      document.getElementById('attachmentPreview').classList.remove('active');
+      document.getElementById('captionOverlay').classList.remove('active');
+      document.body.classList.remove('caption-mode');
       document.getElementById('chatApp').classList.remove('active');
       document.getElementById('loginScreen').style.display = 'flex';
       document.getElementById('passwordInput').value = '';
@@ -787,7 +807,6 @@
             '<audio controls preload="metadata" src="' + escapeAttr(msg.mediaURL) + '"></audio></div>';
         if (msg.message) bodyHtml += '<div class="message-text" style="margin-top:6px;">' + escapeHtml(msg.message) + '</div>';
       } else if (type === 'file' && msg.mediaURL) {
-        // Build a Drive download URL from the lh3 file id
         const fileId = (msg.mediaURL.match(/\/d\/([^/?]+)/) || [])[1] || '';
         const downloadHref = fileId
           ? 'https://drive.google.com/uc?export=download&id=' + fileId
@@ -926,24 +945,9 @@
       }
     }
 
-    // UPDATED: Handles sending text OR staged attachments with captions
     function sendMessage() {
       const input = document.getElementById('messageInput');
       const text = input.value.trim();
-
-      // If there is an attachment ready to send
-      if (pendingAttachment) {
-        input.value = '';
-        const reply = replyingTo;
-        cancelReply();
-        
-        const att = pendingAttachment;
-        clearPendingAttachment(); // Clear UI immediately for smoothness
-        executeAttachmentUpload(att, text, reply);
-        return;
-      }
-
-      // Standard text message
       if (!text) return;
       input.value = '';
       const reply = replyingTo;
@@ -953,13 +957,14 @@
 
     function handleKeyPress(e) { if (e.key === 'Enter') sendMessage(); }
 
-    // NEW: Stage the image instead of sending immediately
+    // --- NEW: Staging and Caption Logic ---
+    
     function handleImageSelect(e) {
       const file = e.target.files[0];
       if (!file) return;
-      e.target.value = ''; // clear input immediately
+      e.target.value = ''; 
 
-      showUploadProgress('Compressing image...');
+      showUploadProgress('Preparing image...');
       compressImage(file)
         .then(function(compressed) {
           hideUploadProgress();
@@ -969,7 +974,7 @@
             name: compressed.name,
             previewURL: URL.createObjectURL(compressed)
           };
-          showAttachmentPreview();
+          showCaptionOverlay();
         })
         .catch(function(err) {
           hideUploadProgress();
@@ -977,11 +982,10 @@
         });
     }
 
-    // NEW: Stage the file instead of sending immediately
     function handleFileSelect(e) {
       const file = e.target.files[0];
       if (!file) return;
-      e.target.value = ''; // clear input immediately
+      e.target.value = '';
 
       pendingAttachment = {
         file: file,
@@ -989,38 +993,58 @@
         name: file.name,
         previewURL: null
       };
-      showAttachmentPreview();
+      showCaptionOverlay();
     }
 
-    // NEW: UI for the staged attachment
-    function showAttachmentPreview() {
+    function showCaptionOverlay() {
       if (!pendingAttachment) return;
-      
-      const content = document.getElementById('attachmentContent');
+
+      const preview = document.getElementById('captionPreview');
       if (pendingAttachment.type === 'image' && pendingAttachment.previewURL) {
-        content.innerHTML = '<img src="' + pendingAttachment.previewURL + '">';
+        preview.innerHTML = '<img src="' + pendingAttachment.previewURL + '">';
       } else {
-        content.innerHTML = '<div class="file-icon">📎</div>';
+        preview.innerHTML = '<div class="file-preview">' +
+          '<svg viewBox="0 0 24 24"><path d="M14 2H6c-1.1 0-1.99.9-1.99 2L4 20c0 1.1.89 2 1.99 2H18c1.1 0 2-.9 2-2V8l-6-6zm2 16H8v-2h8v2zm0-4H8v-2h8v2zm-3-5V3.5L18.5 9H13z"/></svg>' +
+          '<span>' + escapeHtml(pendingAttachment.name) + '</span>' +
+          '<span style="font-size:12px;color:#888">' + formatBytes(pendingAttachment.file.size) + '</span>' +
+          '</div>';
       }
 
-      document.getElementById('attachmentName').textContent = pendingAttachment.name;
-      document.getElementById('attachmentSize').textContent = formatBytes(pendingAttachment.file.size);
+      document.getElementById('captionInput').value = '';
+      document.getElementById('captionOverlay').classList.add('active');
+      document.body.classList.add('caption-mode');
       
-      document.getElementById('attachmentPreview').classList.add('active');
-      document.getElementById('messageInput').focus();
+      setTimeout(function() {
+        document.getElementById('captionInput').focus();
+      }, 100);
     }
 
-    function clearPendingAttachment() {
+    function cancelAttachment() {
       if (pendingAttachment && pendingAttachment.previewURL) {
         URL.revokeObjectURL(pendingAttachment.previewURL);
       }
       pendingAttachment = null;
-      document.getElementById('attachmentPreview').classList.remove('active');
-      document.getElementById('attachmentContent').innerHTML = '';
-      document.getElementById('messageInput').value = '';
+      document.getElementById('captionOverlay').classList.remove('active');
+      document.body.classList.remove('caption-mode');
+      document.getElementById('captionPreview').innerHTML = '';
+      document.getElementById('captionInput').value = '';
     }
 
-    // NEW: Logic to upload the media and send the caption
+    function sendAttachmentWithCaption() {
+      if (!pendingAttachment) return;
+      
+      const caption = document.getElementById('captionInput').value.trim();
+      const att = pendingAttachment;
+      const reply = replyingTo;
+      
+      // Clean up UI
+      cancelAttachment();
+      cancelReply();
+
+      // Start Upload
+      executeAttachmentUpload(att, caption, reply);
+    }
+
     function executeAttachmentUpload(att, caption, reply) {
       showUploadProgress('Uploading ' + formatBytes(att.file.size) + '...');
       
@@ -1031,7 +1055,7 @@
             base64: base64,
             fileName: att.file.name,
             mimeType: att.file.type || 'application/octet-stream',
-            previewURL: att.previewURL // Pass along for the instant fake message
+            previewURL: att.previewURL 
           }, reply);
           hideUploadProgress();
         }).catch(function(err) {
