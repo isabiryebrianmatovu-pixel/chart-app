@@ -67,8 +67,10 @@
       background-color: var(--bg-chat);
       background-image: url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="60" height="60" viewBox="0 0 60 60"><g fill="%23d9d0c7" fill-opacity="0.4"><circle cx="10" cy="10" r="1.5"/><circle cx="40" cy="25" r="1.5"/><circle cx="20" cy="45" r="1.5"/><circle cx="50" cy="50" r="1.5"/></g></svg>');
       scroll-behavior: smooth; }
+      
+    /* UPDATED: Wrapper needs touch-action: pan-y to allow smooth swiping */
     .message-wrapper { position: relative; display: flex; width: 100%;
-      overflow: hidden; flex-shrink: 0; }
+      overflow: hidden; flex-shrink: 0; touch-action: pan-y; }
     .message-wrapper.sent { justify-content: flex-end; }
     .message-wrapper.received { justify-content: flex-start; }
     .reply-indicator { position: absolute; left: 8px; top: 50%;
@@ -78,11 +80,12 @@
       pointer-events: none; transition: opacity 0.15s, transform 0.15s; z-index: 1; }
     .reply-indicator svg { width: 18px; height: 18px; fill: white; }
     .message-wrapper.swiping .reply-indicator { opacity: 1; transform: translateY(-50%) scale(1); }
+    
     .message { max-width: 75%; padding: 8px 12px; border-radius: 8px;
       font-size: 14.5px; line-height: 1.4; position: relative;
       word-wrap: break-word; box-shadow: 0 1px 1px rgba(0,0,0,0.08);
       animation: fadeIn 0.2s ease; transition: transform 0.2s ease;
-      will-change: transform; touch-action: pan-y; z-index: 2; background: var(--received); }
+      will-change: transform; z-index: 2; background: var(--received); }
     @keyframes fadeIn { from { opacity: 0; transform: translateY(5px); } to { opacity: 1; transform: translateY(0); } }
     .message.sent { background: var(--sent); border-top-right-radius: 0; }
     .message.received { background: var(--received); border-top-left-radius: 0; }
@@ -215,7 +218,7 @@
       background: rgba(255,255,255,0.2); border: none; color: white;
       font-size: 22px; cursor: pointer; }
 
-    /* NEW: WhatsApp-Style Caption Overlay */
+    /* WhatsApp-Style Caption Overlay */
     .caption-overlay { position: fixed; inset: 0; background: #000;
       display: none; flex-direction: column; z-index: 300;
       height: 100vh; height: 100dvh; }
@@ -236,7 +239,6 @@
       border: none; font-size: 15px; background: rgba(255,255,255,0.9); outline: none; }
     .caption-footer .send-btn { background: var(--accent); }
     
-    /* Hide main chat UI when overlay is active */
     body.caption-mode #chatApp { display: none; }
 
     .messages-container::-webkit-scrollbar { width: 6px; }
@@ -336,7 +338,7 @@
     </div>
   </div>
 
-  <!-- NEW: Full-Screen Caption Overlay -->
+  <!-- Full-Screen Caption Overlay -->
   <div class="caption-overlay" id="captionOverlay">
     <div class="caption-header">
       <button onclick="cancelAttachment()">✕</button>
@@ -410,7 +412,6 @@
     const MAX_IMAGE_DIMENSION = 1920;
     const IMAGE_QUALITY = 0.82;
 
-    // ============ GET-based API (small actions) ============
     function api(action) {
       const args = Array.prototype.slice.call(arguments, 1);
       const payload = encodeURIComponent(JSON.stringify({ action: action, args: args }));
@@ -442,7 +443,6 @@
         });
     }
 
-    // ============ POST-based API (media / wallpaper) ============
     function apiPost(action) {
       const args = Array.prototype.slice.call(arguments, 1);
       const body = JSON.stringify({ action: action, args: args });
@@ -833,16 +833,21 @@
 
       wrapper.appendChild(el);
       container.appendChild(wrapper);
+      
+      // Attach swipe to the full-width WRAPPER instead of just the bubble
       attachSwipeHandlers(wrapper, el, msg);
     }
 
+    // UPDATED: Full row swipe logic
     function attachSwipeHandlers(wrapper, el, msg) {
       let startX = 0, startY = 0, currentX = 0;
       let isSwiping = false, isHorizontal = null;
 
       function onDown(e) {
-        if (e.target.closest('.quoted-reply') || e.target.closest('audio') ||
+        // Only ignore if pressing interactive elements to avoid blocking them entirely
+        if (e.target.closest('.quoted-reply') || e.target.closest('audio') || 
             e.target.closest('img') || e.target.closest('a')) return;
+        
         const point = e.touches ? e.touches[0] : e;
         startX = point.clientX; startY = point.clientY;
         currentX = 0; isSwiping = false; isHorizontal = null;
@@ -854,7 +859,8 @@
         const point = e.touches ? e.touches[0] : e;
         const dx = point.clientX - startX;
         const dy = point.clientY - startY;
-        if (dx < 0) return;
+        
+        if (dx < 0) return; // Only swipe right
         if (isHorizontal === null) {
           if (Math.abs(dx) > 8 || Math.abs(dy) > 8) {
             isHorizontal = Math.abs(dx) > Math.abs(dy);
@@ -862,6 +868,7 @@
         }
         if (isHorizontal === false) return;
         if (isHorizontal === true && e.cancelable) e.preventDefault();
+        
         isSwiping = true;
         currentX = Math.min(dx, MAX_SWIPE);
         el.style.transform = 'translateX(' + currentX + 'px)';
@@ -891,12 +898,13 @@
         startX = 0; startY = 0; isSwiping = false; isHorizontal = null;
       }
 
-      el.addEventListener('touchstart', onDown, { passive: true });
-      el.addEventListener('touchmove', onMove, { passive: false });
-      el.addEventListener('touchend', onUp);
-      el.addEventListener('touchcancel', onUp);
+      // Attach events to the WRAPPER (the full row) instead of the bubble
+      wrapper.addEventListener('touchstart', onDown, { passive: true });
+      wrapper.addEventListener('touchmove', onMove, { passive: false });
+      wrapper.addEventListener('touchend', onUp);
+      wrapper.addEventListener('touchcancel', onUp);
 
-      el.addEventListener('mousedown', function(e) {
+      wrapper.addEventListener('mousedown', function(e) {
         if (e.target.closest('.quoted-reply') || e.target.closest('audio') ||
             e.target.closest('img') || e.target.closest('a')) return;
         e.preventDefault();
@@ -956,8 +964,6 @@
     }
 
     function handleKeyPress(e) { if (e.key === 'Enter') sendMessage(); }
-
-    // --- NEW: Staging and Caption Logic ---
     
     function handleImageSelect(e) {
       const file = e.target.files[0];
@@ -1037,11 +1043,9 @@
       const att = pendingAttachment;
       const reply = replyingTo;
       
-      // Clean up UI
       cancelAttachment();
       cancelReply();
 
-      // Start Upload
       executeAttachmentUpload(att, caption, reply);
     }
 
