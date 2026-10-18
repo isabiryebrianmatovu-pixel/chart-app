@@ -365,7 +365,7 @@
     const API_URL = 'https://script.google.com/macros/s/AKfycbwMM6HyTPQqmXZZ54aDLzPAI5jcU5T6lWF8mU4PXDPlFBZZrifBqmSFi3xmU7oVIRI/exec';
 
     const CHUNK_SIZE = 5 * 1024 * 1024;
-    const INLINE_MAX = 200 * 1024;   // anything bigger goes chunked
+    const INLINE_MAX = 200 * 1024;
     const MAX_VOICE_SECONDS = 600;
     const MAX_IMAGE_DIMENSION = 1920;
     const IMAGE_QUALITY = 0.82;
@@ -763,7 +763,12 @@
             '<audio controls preload="metadata" src="' + escapeAttr(msg.mediaURL) + '"></audio></div>';
         if (msg.message) bodyHtml += '<div class="message-text" style="margin-top:6px;">' + escapeHtml(msg.message) + '</div>';
       } else if (type === 'file' && msg.mediaURL) {
-        bodyHtml = '<a class="message-file" href="' + escapeAttr(msg.mediaURL) + '" target="_blank" rel="noopener">' +
+        // Build a Drive download URL from the lh3 file id
+        const fileId = (msg.mediaURL.match(/\/d\/([^/?]+)/) || [])[1] || '';
+        const downloadHref = fileId
+          ? 'https://drive.google.com/uc?export=download&id=' + fileId
+          : msg.mediaURL;
+        bodyHtml = '<a class="message-file" href="' + escapeAttr(downloadHref) + '" target="_blank" rel="noopener">' +
             '<svg viewBox="0 0 24 24"><path d="M14 2H6c-1.1 0-1.99.9-1.99 2L4 20c0 1.1.89 2 1.99 2H18c1.1 0 2-.9 2-2V8l-6-6zm2 16H8v-2h8v2zm0-4H8v-2h8v2zm-3-5V3.5L18.5 9H13z"/></svg>' +
             '<span class="file-name">' + escapeHtml(msg.mediaName || 'file') + '</span></a>';
         if (msg.message) bodyHtml += '<div class="message-text" style="margin-top:6px;">' + escapeHtml(msg.message) + '</div>';
