@@ -135,6 +135,17 @@
     .rec-btn.recording { background: #c0392b; animation: recPulse 1.2s infinite; }
     @keyframes recPulse { 0%,100% { box-shadow: 0 0 0 0 rgba(231,76,60,0.6); } 50% { box-shadow: 0 0 0 10px rgba(231,76,60,0); } }
 
+    /* NEW: Attachment Preview Bar */
+    .attachment-preview { display: none; padding: 8px 12px; background: #e8f5e9;
+      border-top: 1px solid #c8e6c9; align-items: center; gap: 10px; flex-shrink: 0; }
+    .attachment-preview.active { display: flex; }
+    .attachment-preview img { width: 40px; height: 40px; object-fit: cover; border-radius: 4px; }
+    .attachment-preview .file-icon { width: 40px; height: 40px; background: #ccc; border-radius: 4px; display: flex; align-items: center; justify-content: center; font-weight: bold; color: #555; }
+    .attachment-preview .info { flex: 1; overflow: hidden; }
+    .attachment-preview .info .name { font-size: 13px; font-weight: 500; color: #333; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .attachment-preview .info .size { font-size: 11px; color: #777; }
+    .attachment-preview .close-btn { background: #c8e6c9; border: none; width: 24px; height: 24px; border-radius: 50%; cursor: pointer; color: #2e7d32; font-weight: bold; display: flex; align-items: center; justify-content: center; }
+
     .reply-preview { display: none; padding: 8px 12px; background: #f0f0f0;
       border-top: 1px solid #ddd; border-left: 4px solid var(--accent);
       align-items: center; gap: 10px; animation: slideUp 0.2s ease; flex-shrink: 0; }
@@ -283,6 +294,16 @@
       <div class="rec-time" id="recTime">0:00</div>
       <button class="header-btn" onclick="cancelRecording()" style="background:#eee;color:#c0392b;">✕ Cancel</button>
       <button class="header-btn" onclick="stopAndSendRecording()" style="background:#27ae60;color:white;">✓ Send</button>
+    </div>
+
+    <!-- NEW: Staged Attachment Preview -->
+    <div class="attachment-preview" id="attachmentPreview">
+      <div id="attachmentContent"></div>
+      <div class="info">
+        <div class="name" id="attachmentName"></div>
+        <div class="size" id="attachmentSize"></div>
+      </div>
+      <button class="close-btn" onclick="clearPendingAttachment()">✕</button>
     </div>
 
     <div class="reply-preview" id="replyPreview">
@@ -545,6 +566,7 @@
     let renderedMessageIds = new Set();
     let lastDateLabel = '';
     let replyingTo = null;
+    let pendingAttachment = null; // NEW: Holds the file/image waiting for a caption
     let pendingWallpaper = null;
     let mediaRecorder = null;
     let audioChunks = [];
@@ -645,6 +667,7 @@
       currentUser = null;
       chatId = null;
       replyingTo = null;
+      pendingAttachment = null;
       renderedMessageIds.clear();
       lastDateLabel = '';
       userHasScrolledUp = false;
@@ -652,6 +675,7 @@
       document.getElementById('replyPreview').classList.remove('active');
       document.getElementById('recordingBar').classList.remove('active');
       document.getElementById('uploadProgress').classList.remove('active');
+      document.getElementById('attachmentPreview').classList.remove('active');
       document.getElementById('chatApp').classList.remove('active');
       document.getElementById('loginScreen').style.display = 'flex';
       document.getElementById('passwordInput').value = '';
@@ -902,9 +926,24 @@
       }
     }
 
+    // UPDATED: Handles sending text OR staged attachments with captions
     function sendMessage() {
       const input = document.getElementById('messageInput');
       const text = input.value.trim();
+
+      // If there is an attachment ready to send
+      if (pendingAttachment) {
+        input.value = '';
+        const reply = replyingTo;
+        cancelReply();
+        
+        const att = pendingAttachment;
+        clearPendingAttachment(); // Clear UI immediately for smoothness
+        executeAttachmentUpload(att, text, reply);
+        return;
+      }
+
+      // Standard text message
       if (!text) return;
       input.value = '';
       const reply = replyingTo;
@@ -913,6 +952,109 @@
     }
 
     function handleKeyPress(e) { if (e.key === 'Enter') sendMessage(); }
+
+    // NEW: Stage the image instead of sending immediately
+    function handleImageSelect(e) {
+      const file = e.target.files[0];
+      if (!file) return;
+      e.target.value = ''; // clear input immediately
+
+      showUploadProgress('Compressing image...');
+      compressImage(file)
+        .then(function(compressed) {
+          hideUploadProgress();
+          pendingAttachment = {
+            file: compressed,
+            type: 'image',
+            name: compressed.name,
+            previewURL: URL.createObjectURL(compressed)
+          };
+          showAttachmentPreview();
+        })
+        .catch(function(err) {
+          hideUploadProgress();
+          alert('Image preparation failed: ' + err.message);
+        });
+    }
+
+    // NEW: Stage the file instead of sending immediately
+    function handleFileSelect(e) {
+      const file = e.target.files[0];
+      if (!file) return;
+      e.target.value = ''; // clear input immediately
+
+      pendingAttachment = {
+        file: file,
+        type: 'file',
+        name: file.name,
+        previewURL: null
+      };
+      showAttachmentPreview();
+    }
+
+    // NEW: UI for the staged attachment
+    function showAttachmentPreview() {
+      if (!pendingAttachment) return;
+      
+      const content = document.getElementById('attachmentContent');
+      if (pendingAttachment.type === 'image' && pendingAttachment.previewURL) {
+        content.innerHTML = '<img src="' + pendingAttachment.previewURL + '">';
+      } else {
+        content.innerHTML = '<div class="file-icon">📎</div>';
+      }
+
+      document.getElementById('attachmentName').textContent = pendingAttachment.name;
+      document.getElementById('attachmentSize').textContent = formatBytes(pendingAttachment.file.size);
+      
+      document.getElementById('attachmentPreview').classList.add('active');
+      document.getElementById('messageInput').focus();
+    }
+
+    function clearPendingAttachment() {
+      if (pendingAttachment && pendingAttachment.previewURL) {
+        URL.revokeObjectURL(pendingAttachment.previewURL);
+      }
+      pendingAttachment = null;
+      document.getElementById('attachmentPreview').classList.remove('active');
+      document.getElementById('attachmentContent').innerHTML = '';
+      document.getElementById('messageInput').value = '';
+    }
+
+    // NEW: Logic to upload the media and send the caption
+    function executeAttachmentUpload(att, caption, reply) {
+      showUploadProgress('Uploading ' + formatBytes(att.file.size) + '...');
+      
+      if (att.file.size <= INLINE_MAX) {
+        fileToBase64(att.file).then(function(base64) {
+          updateUploadProgress(100);
+          sendToServer(att.type, caption, {
+            base64: base64,
+            fileName: att.file.name,
+            mimeType: att.file.type || 'application/octet-stream',
+            previewURL: att.previewURL // Pass along for the instant fake message
+          }, reply);
+          hideUploadProgress();
+        }).catch(function(err) {
+          hideUploadProgress();
+          alert('Upload failed: ' + err.message);
+        });
+      } else {
+        uploadFileChunked(att.file, function(pct) { updateUploadProgress(pct); })
+          .then(function(res) {
+            sendToServer(att.type, caption, {
+              url: res.url,
+              fileName: att.file.name,
+              mimeType: att.file.type || 'application/octet-stream',
+              previewURL: res.url
+            }, reply);
+            hideUploadProgress();
+          })
+          .catch(function(err) {
+            hideUploadProgress();
+            alert('Upload failed: ' + err.message);
+          });
+      }
+    }
 
     function sendToServer(type, text, media, reply) {
       if (!chatId || !currentUser) return;
@@ -957,92 +1099,6 @@
           console.error('Send failed:', err);
           alert('Failed to send: ' + err.message);
         });
-    }
-
-    function handleImageSelect(e) {
-      const file = e.target.files[0];
-      if (!file) return;
-      const reply = replyingTo; cancelReply();
-
-      showUploadProgress('Compressing image...');
-      compressImage(file)
-        .then(function(compressed) {
-          showUploadProgress('Uploading ' + formatBytes(compressed.size) + '...');
-          if (compressed.size <= INLINE_MAX) {
-            return fileToBase64(compressed).then(function(base64) {
-              updateUploadProgress(100);
-              sendToServer('image', '', {
-                base64: base64,
-                fileName: compressed.name,
-                mimeType: compressed.type || 'image/jpeg',
-                previewURL: null
-              }, reply);
-              hideUploadProgress();
-            });
-          }
-          return uploadFileChunked(compressed, function(pct) { updateUploadProgress(pct); })
-            .then(function(res) {
-              sendToServer('image', '', {
-                url: res.url,
-                fileName: compressed.name,
-                mimeType: compressed.type || 'image/jpeg',
-                previewURL: res.url
-              }, reply);
-              hideUploadProgress();
-            });
-        })
-        .catch(function(err) {
-          hideUploadProgress();
-          alert('Image upload failed: ' + err.message);
-          console.error(err);
-        })
-        .finally(function() { e.target.value = ''; });
-    }
-
-    function handleFileSelect(e) {
-      const file = e.target.files[0];
-      if (!file) return;
-      const reply = replyingTo; cancelReply();
-
-      showUploadProgress('Uploading ' + formatBytes(file.size) + '...');
-
-      if (file.size <= INLINE_MAX) {
-        fileToBase64(file)
-          .then(function(base64) {
-            updateUploadProgress(100);
-            sendToServer('file', '', {
-              base64: base64,
-              fileName: file.name,
-              mimeType: file.type || 'application/octet-stream',
-              previewURL: null
-            }, reply);
-            hideUploadProgress();
-          })
-          .catch(function(err) {
-            hideUploadProgress();
-            alert('File upload failed: ' + err.message);
-            console.error(err);
-          })
-          .finally(function() { e.target.value = ''; });
-        return;
-      }
-
-      uploadFileChunked(file, function(pct) { updateUploadProgress(pct); })
-        .then(function(res) {
-          sendToServer('file', '', {
-            url: res.url,
-            fileName: file.name,
-            mimeType: file.type || 'application/octet-stream',
-            previewURL: null
-          }, reply);
-          hideUploadProgress();
-        })
-        .catch(function(err) {
-          hideUploadProgress();
-          alert('File upload failed: ' + err.message);
-          console.error(err);
-        })
-        .finally(function() { e.target.value = ''; });
     }
 
     function toggleRecording() {
