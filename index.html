@@ -896,6 +896,9 @@
           }
           const blob = new Blob([bytes], { type: response.mimeType });
           playableUrl = URL.createObjectURL(blob);
+          
+          // Cache it for future plays
+          localAudioCache[messageId] = playableUrl;
         }
 
         const audio = new Audio(playableUrl);
@@ -1173,12 +1176,12 @@
       }
     }
 
-    function sendToServer(type, text, media, reply) {
+    function sendToServer(type, text, media, reply, tempId) {
       if (!chatId || !currentUser) return;
-      const tempId = 'temp_' + Date.now();
+      const actualTempId = tempId || 'temp_' + Date.now();
 
       const fakeMsg = {
-        messageId: tempId,
+        messageId: actualTempId,
         senderId: currentUser.userId,
         senderName: currentUser.displayName,
         message: text || '',
@@ -1209,8 +1212,15 @@
           reply ? reply.message : '',
           type, payload)
         .then(function(result) {
-          renderedMessageIds.delete(tempId);
-          if (result && result.messageId) renderedMessageIds.add(result.messageId);
+          renderedMessageIds.delete(actualTempId);
+          if (result && result.messageId) {
+            renderedMessageIds.add(result.messageId);
+            // Move the cached audio to the new server message ID
+            if (localAudioCache[actualTempId] && result.messageId) {
+              localAudioCache[result.messageId] = localAudioCache[actualTempId];
+              delete localAudioCache[actualTempId];
+            }
+          }
         })
         .catch(function(err) {
           console.error('Send failed:', err);
@@ -1343,7 +1353,7 @@
                 fileName: 'voice_' + Date.now() + '.' + ext,
                 mimeType: blob.type || 'audio/webm',
                 previewURL: null
-              }, reply, tempId); // Pass tempId for caching
+              }, reply, tempId); 
               hideUploadProgress();
             })
             .catch(function(err) {
