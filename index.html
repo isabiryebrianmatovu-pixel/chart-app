@@ -723,12 +723,35 @@
         .then(function(res) {
           const dot = document.getElementById('statusDot');
           const txt = document.getElementById('statusText');
+          
           if (res.status === 'online') {
             dot.className = 'status-dot online';
-            txt.textContent = 'is online';
+            txt.textContent = 'online';
           } else {
             dot.className = 'status-dot offline';
-            txt.textContent = 'is offline';
+            
+            if (res.lastSeen) {
+              const lastSeenDate = new Date(res.lastSeen);
+              const now = new Date();
+              const diffMs = now - lastSeenDate;
+              const diffMins = Math.floor(diffMs / 60000);
+              const diffHours = Math.floor(diffMs / 3600000);
+              
+              let timeStr = lastSeenDate.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+              
+              if (diffMins < 1) {
+                txt.textContent = 'last seen just now';
+              } else if (diffMins < 60) {
+                txt.textContent = 'last seen ' + diffMins + ' mins ago';
+              } else if (diffHours < 24 && lastSeenDate.getDate() === now.getDate()) {
+                txt.textContent = 'last seen today at ' + timeStr;
+              } else {
+                const dateStr = lastSeenDate.toLocaleDateString([], { month: 'short', day: 'numeric' });
+                txt.textContent = 'last seen ' + dateStr + ' at ' + timeStr;
+              }
+            } else {
+              txt.textContent = 'offline';
+            }
           }
         })
         .catch(function(e) { console.error(e); });
