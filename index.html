@@ -599,9 +599,6 @@
     const SWIPE_THRESHOLD = 60;
     const MAX_SWIPE = 80;
 
-    // Audio cache to prevent fetching same blob multiple times
-    const audioBlobCache = {};
-
     document.addEventListener('DOMContentLoaded', function() {
       const saved = localStorage.getItem('chartUser');
       if (saved) {
@@ -808,7 +805,6 @@
         if (msg.message) bodyHtml += '<div class="message-text" style="margin-top:6px;">' + escapeHtml(msg.message) + '</div>';
       } else if (type === 'voice' && msg.mediaURL) {
         
-        // CUSTOM AUDIO PLAYER UI
         bodyHtml = '<div class="message-voice" onclick="playVoiceNote(this, \'' + escapeAttr(msg.mediaURL) + '\', \'' + msg.messageId + '\')">' +
             '<div class="voice-icon"><svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg></div>' +
             '<div class="voice-progress"><div class="voice-progress-bar" id="prog-' + msg.messageId + '"></div></div>' +
@@ -846,29 +842,26 @@
       attachSwipeHandlers(wrapper, el, msg);
     }
 
-    // NEW: Play audio by fetching as Blob to bypass Google CORS
     async function playVoiceNote(container, url, messageId) {
       const iconDiv = container.querySelector('.voice-icon');
       const svg = iconDiv.querySelector('svg');
       const progressBar = document.getElementById('prog-' + messageId);
       const timeDiv = document.getElementById('time-' + messageId);
       
-      // If already playing, pause it
       if (window.currentAudio && window.currentAudioMsgId === messageId) {
         if (!window.currentAudio.paused) {
           window.currentAudio.pause();
-          svg.innerHTML = '<path d="M8 5v14l11-7z"/>'; // Play icon
+          svg.innerHTML = '<path d="M8 5v14l11-7z"/>';
           iconDiv.classList.remove('playing');
           return;
         } else {
           window.currentAudio.play();
-          svg.innerHTML = '<path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/>'; // Pause icon
+          svg.innerHTML = '<path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/>';
           iconDiv.classList.add('playing');
           return;
         }
       }
 
-      // Stop any previously playing audio
       if (window.currentAudio) {
         window.currentAudio.pause();
         const prevIcon = document.querySelector('.voice-icon.playing');
@@ -878,29 +871,25 @@
         }
       }
 
-      // Change UI to loading state
       svg.innerHTML = '<circle cx="12" cy="12" r="10" stroke="white" stroke-width="2" fill="none" stroke-dasharray="30 30"><animateTransform attributeName="transform" type="rotate" from="0 12 12" to="360 12 12" dur="1s" repeatCount="indefinite"/></circle>';
       
       try {
-        let audioUrl = url;
-        
-        // Extract ID and create a direct download link to fetch
         const fileIdMatch = url.match(/\/d\/([^/?]+)/);
-        if (fileIdMatch && fileIdMatch[1]) {
-          audioUrl = 'https://drive.google.com/uc?export=download&id=' + fileIdMatch[1];
-        }
+        if (!fileIdMatch || !fileIdMatch[1]) throw new Error('Invalid file URL');
+        const fileId = fileIdMatch[1];
 
-        // Fetch as blob if not already cached
-        if (!audioBlobCache[messageId]) {
-          const response = await fetch(audioUrl);
-          if (!response.ok) throw new Error('Network error');
-          const blob = await response.blob();
-          audioBlobCache[messageId] = URL.createObjectURL(blob);
-        }
+        const response = await api('getAudioData', fileId);
+        if (!response.success) throw new Error(response.error || 'Failed to fetch audio');
 
-        const playableUrl = audioBlobCache[messageId];
+        const binaryString = atob(response.base64);
+        const bytes = new Uint8Array(binaryString.length);
+        for (let i = 0; i < binaryString.length; i++) {
+            bytes[i] = binaryString.charCodeAt(i);
+        }
+        const blob = new Blob([bytes], { type: response.mimeType });
+        const playableUrl = URL.createObjectURL(blob);
+
         const audio = new Audio(playableUrl);
-        
         window.currentAudio = audio;
         window.currentAudioMsgId = messageId;
 
@@ -908,7 +897,6 @@
           if (audio.duration) {
             const pct = (audio.currentTime / audio.duration) * 100;
             progressBar.style.width = pct + '%';
-            
             const mins = Math.floor(audio.currentTime / 60);
             const secs = Math.floor(audio.currentTime % 60);
             timeDiv.textContent = mins + ':' + (secs < 10 ? '0' : '') + secs;
@@ -923,12 +911,12 @@
         });
 
         audio.play();
-        svg.innerHTML = '<path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/>'; // Pause icon
+        svg.innerHTML = '<path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/>';
         iconDiv.classList.add('playing');
 
       } catch (err) {
         console.error('Audio playback error:', err);
-        alert('Could not load voice note. It might still be processing on Google Drive.');
+        alert('Could not load voice note: ' + err.message);
         svg.innerHTML = '<path d="M8 5v14l11-7z"/>';
       }
     }
