@@ -599,7 +599,6 @@
     const SWIPE_THRESHOLD = 60;
     const MAX_SWIPE = 80;
 
-    // Audio cache to store local blobs before upload
     const localAudioCache = {};
 
     document.addEventListener('DOMContentLoaded', function() {
@@ -877,11 +876,9 @@
       svg.innerHTML = '<circle cx="12" cy="12" r="10" stroke="white" stroke-width="2" fill="none" stroke-dasharray="30 30"><animateTransform attributeName="transform" type="rotate" from="0 12 12" to="360 12 12" dur="1s" repeatCount="indefinite"/></circle>';
       
       try {
-        // 1. Check if we have the local audio cached (instant playback for sender)
         let playableUrl = localAudioCache[messageId];
 
         if (!playableUrl) {
-          // 2. If not in cache (receiver or after refresh), fetch from server via API
           const fileIdMatch = url.match(/\/d\/([^/?]+)/);
           if (!fileIdMatch || !fileIdMatch[1]) throw new Error('Invalid file URL');
           const fileId = fileIdMatch[1];
@@ -897,7 +894,6 @@
           const blob = new Blob([bytes], { type: response.mimeType });
           playableUrl = URL.createObjectURL(blob);
           
-          // Save to cache so we don't fetch it again
           localAudioCache[messageId] = playableUrl;
         }
 
@@ -1216,7 +1212,6 @@
           if (result && result.messageId) {
             renderedMessageIds.add(result.messageId);
             
-            // Make the local audio blob survive the ID change!
             if (localAudioCache[actualTempId]) {
               localAudioCache[result.messageId] = localAudioCache[actualTempId];
               delete localAudioCache[actualTempId];
@@ -1342,7 +1337,6 @@
 
         const tempId = 'temp_' + Date.now();
         
-        // Cache the blob URL locally so the bubble is playable instantly!
         localAudioCache[tempId] = URL.createObjectURL(blob);
         
         if (blob.size <= INLINE_MAX) {
