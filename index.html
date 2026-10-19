@@ -599,6 +599,9 @@
     const SWIPE_THRESHOLD = 60;
     const MAX_SWIPE = 80;
 
+    // Audio cache to store local blobs before upload
+    const localAudioCache = {};
+
     document.addEventListener('DOMContentLoaded', function() {
       const saved = localStorage.getItem('chartUser');
       if (saved) {
@@ -874,20 +877,26 @@
       svg.innerHTML = '<circle cx="12" cy="12" r="10" stroke="white" stroke-width="2" fill="none" stroke-dasharray="30 30"><animateTransform attributeName="transform" type="rotate" from="0 12 12" to="360 12 12" dur="1s" repeatCount="indefinite"/></circle>';
       
       try {
-        const fileIdMatch = url.match(/\/d\/([^/?]+)/);
-        if (!fileIdMatch || !fileIdMatch[1]) throw new Error('Invalid file URL');
-        const fileId = fileIdMatch[1];
+        // Check if we have the local audio cached (for instant playback)
+        let playableUrl = localAudioCache[messageId];
 
-        const response = await api('getAudioData', fileId);
-        if (!response.success) throw new Error(response.error || 'Failed to fetch audio');
+        if (!playableUrl) {
+          // If not, fetch it from the server via API
+          const fileIdMatch = url.match(/\/d\/([^/?]+)/);
+          if (!fileIdMatch || !fileIdMatch[1]) throw new Error('Invalid file URL');
+          const fileId = fileIdMatch[1];
 
-        const binaryString = atob(response.base64);
-        const bytes = new Uint8Array(binaryString.length);
-        for (let i = 0; i < binaryString.length; i++) {
-            bytes[i] = binaryString.charCodeAt(i);
+          const response = await api('getAudioData', fileId);
+          if (!response.success) throw new Error(response.error || 'Failed to fetch audio');
+
+          const binaryString = atob(response.base64);
+          const bytes = new Uint8Array(binaryString.length);
+          for (let i = 0; i < binaryString.length; i++) {
+              bytes[i] = binaryString.charCodeAt(i);
+          }
+          const blob = new Blob([bytes], { type: response.mimeType });
+          playableUrl = URL.createObjectURL(blob);
         }
-        const blob = new Blob([bytes], { type: response.mimeType });
-        const playableUrl = URL.createObjectURL(blob);
 
         const audio = new Audio(playableUrl);
         window.currentAudio = audio;
@@ -1320,6 +1329,11 @@
         const ext = blob.type.indexOf('mp4') !== -1 ? 'm4a' :
                     blob.type.indexOf('ogg') !== -1 ? 'ogg' : 'webm';
 
+        const tempId = 'temp_' + Date.now();
+        
+        // Cache the blob URL locally so the bubble is playable instantly!
+        localAudioCache[tempId] = URL.createObjectURL(blob);
+        
         if (blob.size <= INLINE_MAX) {
           blobToBase64(blob)
             .then(function(base64) {
@@ -1329,7 +1343,7 @@
                 fileName: 'voice_' + Date.now() + '.' + ext,
                 mimeType: blob.type || 'audio/webm',
                 previewURL: null
-              }, reply);
+              }, reply, tempId); // Pass tempId for caching
               hideUploadProgress();
             })
             .catch(function(err) {
@@ -1347,7 +1361,7 @@
                 fileName: res.name || 'voice.' + ext,
                 mimeType: blob.type || 'audio/webm',
                 previewURL: res.url
-              }, reply);
+              }, reply, tempId);
               hideUploadProgress();
             })
             .catch(function(err) {
