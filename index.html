@@ -877,11 +877,11 @@
       svg.innerHTML = '<circle cx="12" cy="12" r="10" stroke="white" stroke-width="2" fill="none" stroke-dasharray="30 30"><animateTransform attributeName="transform" type="rotate" from="0 12 12" to="360 12 12" dur="1s" repeatCount="indefinite"/></circle>';
       
       try {
-        // Check if we have the local audio cached (for instant playback)
+        // 1. Check if we have the local audio cached (instant playback for sender)
         let playableUrl = localAudioCache[messageId];
 
         if (!playableUrl) {
-          // If not, fetch it from the server via API
+          // 2. If not in cache (receiver or after refresh), fetch from server via API
           const fileIdMatch = url.match(/\/d\/([^/?]+)/);
           if (!fileIdMatch || !fileIdMatch[1]) throw new Error('Invalid file URL');
           const fileId = fileIdMatch[1];
@@ -897,7 +897,7 @@
           const blob = new Blob([bytes], { type: response.mimeType });
           playableUrl = URL.createObjectURL(blob);
           
-          // Cache it for future plays
+          // Save to cache so we don't fetch it again
           localAudioCache[messageId] = playableUrl;
         }
 
@@ -1215,8 +1215,9 @@
           renderedMessageIds.delete(actualTempId);
           if (result && result.messageId) {
             renderedMessageIds.add(result.messageId);
-            // Move the cached audio to the new server message ID
-            if (localAudioCache[actualTempId] && result.messageId) {
+            
+            // Make the local audio blob survive the ID change!
+            if (localAudioCache[actualTempId]) {
               localAudioCache[result.messageId] = localAudioCache[actualTempId];
               delete localAudioCache[actualTempId];
             }
